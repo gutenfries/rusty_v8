@@ -1,5 +1,7 @@
 // Copyright 2019-2021 the Deno authors. All rights reserved. MIT license.
 use crate::function::FunctionCallbackInfo;
+use crate::gc::GCCallbackFlags;
+use crate::gc::GCType;
 use crate::handle::FinalizerCallback;
 use crate::handle::FinalizerMap;
 use crate::isolate_create_params::raw;
@@ -7,6 +9,7 @@ use crate::isolate_create_params::CreateParams;
 use crate::promise::PromiseRejectMessage;
 use crate::scope::data::ScopeData;
 use crate::snapshot::SnapshotCreator;
+use crate::support::char;
 use crate::support::int;
 use crate::support::Allocated;
 use crate::support::MapFnFrom;
@@ -49,7 +52,6 @@ use std::mem::size_of;
 use std::mem::MaybeUninit;
 use std::ops::Deref;
 use std::ops::DerefMut;
-use std::os::raw::c_char;
 use std::ptr;
 use std::ptr::drop_in_place;
 use std::ptr::null_mut;
@@ -62,12 +64,24 @@ use std::sync::Mutex;
 ///               Isolate::PerformMicrotaskCheckpoint() method;
 ///   - auto: microtasks are invoked when the script call depth decrements
 ///           to zero.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub enum MicrotasksPolicy {
   Explicit = 0,
   // Scoped = 1 (RAII) is omitted for now, doesn't quite map to idiomatic Rust.
   Auto = 2,
+}
+
+/// Memory pressure level for the MemoryPressureNotification.
+/// None hints V8 that there is no memory pressure.
+/// Moderate hints V8 to speed up incremental garbage collection at the cost
+/// of higher latency due to garbage collection pauses.
+/// Critical hints V8 to free memory as soon as possible. Garbage collection
+/// pauses at this level will be large.
+pub enum MemoryPressureLevel {
+  None = 0,
+  Moderate = 1,
+  Critical = 2,
 }
 
 /// PromiseHook with type Init is called when a new promise is
@@ -84,13 +98,22 @@ pub enum MicrotasksPolicy {
 ///
 /// PromiseHook with type After is called right at the end of the
 /// PromiseReactionJob.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub enum PromiseHookType {
   Init,
   Resolve,
   Before,
   After,
+}
+
+/// Types of garbage collections that can be requested via
+/// [`Isolate::request_garbage_collection_for_testing`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub enum GarbageCollectionType {
+  Full,
+  Minor,
 }
 
 pub type MessageCallback = extern "C" fn(Local<Message>, Local<Value>);
@@ -100,7 +123,7 @@ pub type PromiseHook =
 
 pub type PromiseRejectCallback = extern "C" fn(PromiseRejectMessage);
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub enum WasmAsyncSuccess {
   Success,
@@ -290,6 +313,13 @@ where
 pub type HostCreateShadowRealmContextCallback =
   for<'s> fn(scope: &mut HandleScope<'s>) -> Option<Local<'s, Context>>;
 
+pub type GcCallbackWithData = extern "C" fn(
+  isolate: *mut Isolate,
+  r#type: GCType,
+  flags: GCCallbackFlags,
+  data: *mut c_void,
+);
+
 pub type InterruptCallback =
   extern "C" fn(isolate: &mut Isolate, data: *mut c_void);
 
@@ -302,11 +332,11 @@ pub type NearHeapLimitCallback = extern "C" fn(
 #[repr(C)]
 pub struct OomDetails {
   pub is_heap_oom: bool,
-  pub detail: *const c_char,
+  pub detail: *const char,
 }
 
 pub type OomErrorCallback =
-  extern "C" fn(location: *const c_char, details: &OomDetails);
+  extern "C" fn(location: *const char, details: &OomDetails);
 
 /// Collection of V8 heap information.
 ///
@@ -348,6 +378,7 @@ extern "C" {
   fn v8__Isolate__GetNumberOfDataSlots(this: *const Isolate) -> u32;
   fn v8__Isolate__Enter(this: *mut Isolate);
   fn v8__Isolate__Exit(this: *mut Isolate);
+  fn v8__Isolate__MemoryPressureNotification(this: *mut Isolate, level: u8);
   fn v8__Isolate__ClearKeptObjects(isolate: *mut Isolate);
   fn v8__Isolate__LowMemoryNotification(isolate: *mut Isolate);
   fn v8__Isolate__GetHeapStatistics(this: *mut Isolate, s: *mut HeapStatistics);
@@ -360,6 +391,17 @@ extern "C" {
     isolate: *mut Isolate,
     callback: MessageCallback,
   ) -> bool;
+  fn v8__Isolate__AddGCPrologueCallback(
+    isolate: *mut Isolate,
+    callback: GcCallbackWithData,
+    data: *mut c_void,
+    gc_type_filter: GCType,
+  );
+  fn v8__Isolate__RemoveGCPrologueCallback(
+    isolate: *mut Isolate,
+    callback: GcCallbackWithData,
+    data: *mut c_void,
+  );
   fn v8__Isolate__AddNearHeapLimitCallback(
     isolate: *mut Isolate,
     callback: NearHeapLimitCallback,
@@ -438,6 +480,10 @@ extern "C" {
     callback: extern "C" fn(*const FunctionCallbackInfo),
   );
   fn v8__Isolate__HasPendingBackgroundTasks(isolate: *const Isolate) -> bool;
+  fn v8__Isolate__RequestGarbageCollectionForTesting(
+    isolate: *mut Isolate,
+    r#type: usize,
+  );
 
   fn v8__HeapProfiler__TakeHeapSnapshot(
     isolate: *mut Isolate,
@@ -772,6 +818,15 @@ impl Isolate {
     v8__Isolate__Exit(self)
   }
 
+  /// Optional notification that the system is running low on memory.
+  /// V8 uses these notifications to guide heuristics.
+  /// It is allowed to call this function from another thread while
+  /// the isolate is executing long running JavaScript code.
+  #[inline(always)]
+  pub fn memory_pressure_notification(&mut self, level: MemoryPressureLevel) {
+    unsafe { v8__Isolate__MemoryPressureNotification(self, level as u8) }
+  }
+
   /// Clears the set of objects held strongly by the heap. This set of
   /// objects are originally built when a WeakRef is created or
   /// successfully dereferenced.
@@ -952,6 +1007,38 @@ impl Isolate {
     }
   }
 
+  /// Enables the host application to receive a notification before a
+  /// garbage collection. Allocations are allowed in the callback function,
+  /// but the callback is not re-entrant: if the allocation inside it will
+  /// trigger the garbage collection, the callback won't be called again.
+  /// It is possible to specify the GCType filter for your callback. But it is
+  /// not possible to register the same callback function two times with
+  /// different GCType filters.
+  #[allow(clippy::not_unsafe_ptr_arg_deref)] // False positive.
+  #[inline(always)]
+  pub fn add_gc_prologue_callback(
+    &mut self,
+    callback: GcCallbackWithData,
+    data: *mut c_void,
+    gc_type_filter: GCType,
+  ) {
+    unsafe {
+      v8__Isolate__AddGCPrologueCallback(self, callback, data, gc_type_filter)
+    }
+  }
+
+  /// This function removes callback which was installed by
+  /// AddGCPrologueCallback function.
+  #[allow(clippy::not_unsafe_ptr_arg_deref)] // False positive.
+  #[inline(always)]
+  pub fn remove_gc_prologue_callback(
+    &mut self,
+    callback: GcCallbackWithData,
+    data: *mut c_void,
+  ) {
+    unsafe { v8__Isolate__RemoveGCPrologueCallback(self, callback, data) }
+  }
+
   /// Add a callback to invoke in case the heap size is close to the heap limit.
   /// If multiple callbacks are added, only the most recently added callback is
   /// invoked.
@@ -1064,6 +1151,31 @@ impl Isolate {
   #[inline(always)]
   pub fn has_pending_background_tasks(&self) -> bool {
     unsafe { v8__Isolate__HasPendingBackgroundTasks(self) }
+  }
+
+  /// Request garbage collection with a specific embedderstack state in this
+  /// Isolate. It is only valid to call this function if --expose_gc was
+  /// specified.
+  ///
+  /// This should only be used for testing purposes and not to enforce a garbage
+  /// collection schedule. It has strong negative impact on the garbage
+  /// collection performance. Use IdleNotificationDeadline() or
+  /// LowMemoryNotification() instead to influence the garbage collection
+  /// schedule.
+  #[inline(always)]
+  pub fn request_garbage_collection_for_testing(
+    &mut self,
+    r#type: GarbageCollectionType,
+  ) {
+    unsafe {
+      v8__Isolate__RequestGarbageCollectionForTesting(
+        self,
+        match r#type {
+          GarbageCollectionType::Full => 0,
+          GarbageCollectionType::Minor => 1,
+        },
+      )
+    }
   }
 
   unsafe fn clear_scope_and_annex(&mut self) {

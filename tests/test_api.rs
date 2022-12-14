@@ -161,7 +161,7 @@ fn global_from_into_raw() {
     (raw, weak)
   };
 
-  eval(scope, "gc()").unwrap();
+  scope.request_garbage_collection_for_testing(v8::GarbageCollectionType::Full);
   assert!(!weak.is_empty());
 
   {
@@ -171,7 +171,7 @@ fn global_from_into_raw() {
     assert_eq!(global_from_weak, reconstructed);
   }
 
-  eval(scope, "gc()").unwrap();
+  scope.request_garbage_collection_for_testing(v8::GarbageCollectionType::Full);
   assert!(weak.is_empty());
 }
 
@@ -576,16 +576,15 @@ fn array_buffer() {
     assert!(!ab.was_detached());
     assert!(ab.is_detachable());
 
-    let key = v8::undefined(scope);
-    assert!(ab.detach(key.into()).unwrap());
+    assert!(ab.detach(None).unwrap());
     assert_eq!(0, ab.byte_length());
     assert!(ab.was_detached());
-    assert!(ab.detach(key.into()).unwrap()); // Calling it twice should be a no-op.
+    assert!(ab.detach(None).unwrap()); // Calling it twice should be a no-op.
 
     // detecting if it was detached on a zero-length ArrayBuffer should work
     let empty_ab = v8::ArrayBuffer::new(scope, 0);
     assert!(!empty_ab.was_detached());
-    assert!(empty_ab.detach(key.into()).unwrap());
+    assert!(empty_ab.detach(None).unwrap());
     assert!(empty_ab.was_detached());
 
     let bs = v8::ArrayBuffer::new_backing_store(scope, 84);
@@ -4425,6 +4424,25 @@ fn shared_array_buffer() {
 }
 
 #[test]
+fn typeof_checker() {
+  let _setup_guard = setup();
+
+  let isolate = &mut v8::Isolate::new(Default::default());
+  let scope = &mut v8::HandleScope::new(isolate);
+  let context = v8::Context::new(scope);
+  let scope = &mut v8::ContextScope::new(scope, context);
+
+  let value_1 = eval(scope, "").unwrap();
+  let type_of = value_1.type_of(scope);
+  let value_2 = eval(scope, "").unwrap();
+  let type_of_2 = value_2.type_of(scope);
+  assert_eq!(type_of, type_of_2);
+  let value_3 = eval(scope, "1").unwrap();
+  let type_of_3 = value_3.type_of(scope);
+  assert_ne!(type_of_2, type_of_3);
+}
+
+#[test]
 #[allow(clippy::cognitive_complexity)]
 #[allow(clippy::eq_op)]
 fn value_checker() {
@@ -5019,6 +5037,7 @@ struct ChannelCounter {
   base: v8::inspector::ChannelBase,
   count_send_response: usize,
   count_send_notification: usize,
+  notifications: Vec<String>,
   count_flush_protocol_notifications: usize,
 }
 
@@ -5028,6 +5047,7 @@ impl ChannelCounter {
       base: v8::inspector::ChannelBase::new::<Self>(),
       count_send_response: 0,
       count_send_notification: 0,
+      notifications: vec![],
       count_flush_protocol_notifications: 0,
     }
   }
@@ -5056,8 +5076,10 @@ impl v8::inspector::ChannelImpl for ChannelCounter {
     &mut self,
     message: v8::UniquePtr<v8::inspector::StringBuffer>,
   ) {
-    println!("send_notification message {}", message.unwrap().string());
+    let msg = message.unwrap().string().to_string();
+    println!("send_notification message {}", msg);
     self.count_send_notification += 1;
+    self.notifications.push(msg);
   }
   fn flush_protocol_notifications(&mut self) {
     self.count_flush_protocol_notifications += 1;
@@ -5124,7 +5146,8 @@ fn inspector_dispatch_protocol_message() {
 
   let name = b"";
   let name_view = StringView::from(&name[..]);
-  inspector.context_created(context, 1, name_view);
+  let aux_data = StringView::from(&name[..]);
+  inspector.context_created(context, 1, name_view, aux_data);
   let mut channel = ChannelCounter::new();
   let state = b"{}";
   let state_view = StringView::from(&state[..]);
@@ -5143,6 +5166,75 @@ fn inspector_dispatch_protocol_message() {
   assert_eq!(channel.count_send_response, 1);
   assert_eq!(channel.count_send_notification, 0);
   assert_eq!(channel.count_flush_protocol_notifications, 0);
+  inspector.context_destroyed(context);
+}
+
+#[test]
+fn inspector_exception_thrown() {
+  let _setup_guard = setup();
+  let isolate = &mut v8::Isolate::new(Default::default());
+
+  use v8::inspector::*;
+  let mut default_client = ClientCounter::new();
+  let mut inspector = V8Inspector::create(isolate, &mut default_client);
+
+  let scope = &mut v8::HandleScope::new(isolate);
+  let context = v8::Context::new(scope);
+  let mut context_scope = v8::ContextScope::new(scope, context);
+
+  let name = b"";
+  let name_view = StringView::from(&name[..]);
+  let aux_data = b"";
+  let aux_data_view = StringView::from(&aux_data[..]);
+  inspector.context_created(context, 1, name_view, aux_data_view);
+  let mut channel = ChannelCounter::new();
+  let state = b"{}";
+  let state_view = StringView::from(&state[..]);
+  let mut session = inspector.connect(
+    1,
+    &mut channel,
+    state_view,
+    V8InspectorClientTrustLevel::Untrusted,
+  );
+  let message = String::from(r#"{"id":1,"method":"Runtime.enable"}"#);
+  let message = &message.into_bytes()[..];
+  let string_view = StringView::from(message);
+  session.dispatch_protocol_message(string_view);
+  assert_eq!(channel.count_send_response, 1);
+  assert_eq!(channel.count_send_notification, 1);
+  assert_eq!(channel.count_flush_protocol_notifications, 0);
+
+  let message = "test exception".to_string();
+  let message = &message.into_bytes()[..];
+  let message_string_view = StringView::from(message);
+  let detailed_message = "detailed message".to_string();
+  let detailed_message = &detailed_message.into_bytes()[..];
+  let detailed_message_string_view = StringView::from(detailed_message);
+  let url = "file://exception.js".to_string();
+  let url = &url.into_bytes()[..];
+  let url_string_view = StringView::from(url);
+  let exception_msg =
+    v8::String::new(&mut context_scope, "This is a test error").unwrap();
+  let exception = v8::Exception::error(&mut context_scope, exception_msg);
+  let stack_trace =
+    v8::Exception::get_stack_trace(&mut context_scope, exception).unwrap();
+  let stack_trace_ptr = inspector.create_stack_trace(stack_trace);
+  let _id = inspector.exception_thrown(
+    context,
+    message_string_view,
+    exception,
+    detailed_message_string_view,
+    url_string_view,
+    1,
+    1,
+    stack_trace_ptr,
+    1,
+  );
+
+  assert_eq!(channel.count_send_notification, 2);
+  let notification = channel.notifications.get(1).unwrap().clone();
+  let expected_notification = "{\"method\":\"Runtime.exceptionThrown\",\"params\":{\"timestamp\":0,\"exceptionDetails\":{\"exceptionId\":1,\"text\":\"test exception\",\"lineNumber\":0,\"columnNumber\":0,\"scriptId\":\"1\",\"url\":\"file://exception.js\",\"exception\":{\"type\":\"object\",\"subtype\":\"error\",\"className\":\"Error\",\"description\":\"Error: This is a test error\",\"objectId\":\"1.1.1\",\"preview\":{\"type\":\"object\",\"subtype\":\"error\",\"description\":\"Error: This is a test error\",\"overflow\":false,\"properties\":[{\"name\":\"stack\",\"type\":\"string\",\"value\":\"Error: This is a test error\"},{\"name\":\"message\",\"type\":\"string\",\"value\":\"This is a test error\"}]}},\"executionContextId\":1}}}";
+  assert_eq!(notification, expected_notification);
 }
 
 #[test]
@@ -5170,7 +5262,8 @@ fn inspector_schedule_pause_on_next_statement() {
 
   let name = b"";
   let name_view = StringView::from(&name[..]);
-  inspector.context_created(context, 1, name_view);
+  let aux_data = StringView::from(&name[..]);
+  inspector.context_created(context, 1, name_view, aux_data);
 
   // In order for schedule_pause_on_next_statement to work, it seems you need
   // to first enable the debugger.
@@ -5264,7 +5357,9 @@ fn inspector_console_api_message() {
 
   let name = b"";
   let name_view = StringView::from(&name[..]);
-  inspector.context_created(context, 1, name_view);
+  let aux_data = b"{\"isDefault\": true}";
+  let aux_data_view = StringView::from(&aux_data[..]);
+  inspector.context_created(context, 1, name_view, aux_data_view);
 
   let source = r#"
     console.log("one");
@@ -5769,7 +5864,9 @@ fn synthetic_evaluation_steps<'a>(
     let scope = &mut v8::TryCatch::new(scope);
     let name = v8::String::new(scope, "does not exist").unwrap();
     let value = v8::undefined(scope).into();
-    assert!(module.set_synthetic_module_export(scope, name, value) == None);
+    assert!(module
+      .set_synthetic_module_export(scope, name, value)
+      .is_none());
     assert!(scope.has_caught());
     scope.reset();
   }
@@ -6281,7 +6378,7 @@ impl<'a> Custom2Value {
   }
 }
 
-impl<'a> v8::ValueSerializerImpl for Custom2Value {
+impl v8::ValueSerializerImpl for Custom2Value {
   #[allow(unused_variables)]
   fn throw_data_clone_error<'s>(
     &mut self,
@@ -6330,6 +6427,15 @@ fn value_serializer_not_implemented() {
   );
 }
 
+#[test]
+fn memory_pressure_notification() {
+  let _setup_guard = setup();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  isolate.memory_pressure_notification(v8::MemoryPressureLevel::Moderate);
+  isolate.memory_pressure_notification(v8::MemoryPressureLevel::Critical);
+  isolate.memory_pressure_notification(v8::MemoryPressureLevel::None);
+}
+
 // Flaky on aarch64-qemu (Stack corruption).
 #[cfg(not(target_os = "android"))]
 #[test]
@@ -6346,18 +6452,21 @@ fn clear_kept_objects() {
   let step1 = r#"
     var weakrefs = [];
     for (let i = 0; i < 424242; i++) weakrefs.push(new WeakRef({ i }));
-    gc();
+  "#;
+  let step2 = r#"
     if (weakrefs.some(w => !w.deref())) throw "fail";
   "#;
 
-  let step2 = r#"
-    gc();
+  let step3 = r#"
     if (weakrefs.every(w => w.deref())) throw "fail";
   "#;
 
   eval(scope, step1).unwrap();
-  scope.clear_kept_objects();
+  scope.request_garbage_collection_for_testing(v8::GarbageCollectionType::Full);
   eval(scope, step2).unwrap();
+  scope.clear_kept_objects();
+  scope.request_garbage_collection_for_testing(v8::GarbageCollectionType::Full);
+  eval(scope, step3).unwrap();
 }
 
 #[test]
@@ -6495,7 +6604,7 @@ fn run_with_rust_allocator() {
   }
   unsafe extern "C" fn free(count: &AtomicUsize, data: *mut c_void, n: usize) {
     count.fetch_sub(n, Ordering::SeqCst);
-    Box::from_raw(std::slice::from_raw_parts_mut(data as *mut u8, n));
+    let _ = Box::from_raw(std::slice::from_raw_parts_mut(data as *mut u8, n));
   }
   unsafe extern "C" fn reallocate(
     count: &AtomicUsize,
@@ -7274,8 +7383,14 @@ fn backing_store_data() {
   let store = v8::ArrayBuffer::new_backing_store_from_vec(v).make_shared();
   let buf = v8::ArrayBuffer::with_backing_store(&mut scope, &store);
   assert_eq!(buf.byte_length(), len);
+  assert!(buf.data().is_some());
   assert_eq!(
-    unsafe { std::slice::from_raw_parts_mut(buf.data() as *mut u8, len) },
+    unsafe {
+      std::slice::from_raw_parts_mut(
+        buf.data().unwrap().cast::<u8>().as_ptr(),
+        len,
+      )
+    },
     &[1, 2, 3, 4, 5]
   );
 }
@@ -7366,7 +7481,7 @@ fn weak_handle() {
     let scope = &mut v8::HandleScope::new(scope);
     let local = v8::Object::new(scope);
 
-    let weak = v8::Weak::new(scope, &local);
+    let weak = v8::Weak::new(scope, local);
     assert!(!weak.is_empty());
     assert_eq!(weak, local);
     assert_eq!(weak.to_local(scope), Some(local));
@@ -7376,7 +7491,7 @@ fn weak_handle() {
 
   let scope = &mut v8::HandleScope::new(scope);
 
-  eval(scope, "gc()").unwrap();
+  scope.request_garbage_collection_for_testing(v8::GarbageCollectionType::Full);
 
   assert!(weak.is_empty());
   assert_eq!(weak.to_local(scope), None);
@@ -7401,11 +7516,12 @@ fn finalizers() {
       let scope = &mut v8::HandleScope::new(scope);
       let local = v8::Object::new(scope);
       let _ =
-        v8::Weak::with_finalizer(scope, &local, Box::new(|_| unreachable!()));
+        v8::Weak::with_finalizer(scope, local, Box::new(|_| unreachable!()));
     }
 
     let scope = &mut v8::HandleScope::new(scope);
-    eval(scope, "gc()").unwrap();
+    scope
+      .request_garbage_collection_for_testing(v8::GarbageCollectionType::Full);
   }
 
   let finalizer_called = Rc::new(Cell::new(false));
@@ -7422,7 +7538,7 @@ fn finalizers() {
 
     let weak = Rc::new(v8::Weak::with_finalizer(
       scope,
-      &local,
+      local,
       Box::new(move |_| {
         let (weak, finalizer_called) = rx.try_recv().unwrap();
         finalizer_called.set(true);
@@ -7440,7 +7556,7 @@ fn finalizers() {
   };
 
   let scope = &mut v8::HandleScope::new(scope);
-  eval(scope, "gc()").unwrap();
+  scope.request_garbage_collection_for_testing(v8::GarbageCollectionType::Full);
   assert!(weak.is_empty());
   assert!(finalizer_called.get());
 }
@@ -7468,13 +7584,14 @@ fn guaranteed_finalizers() {
       let local = v8::Object::new(scope);
       let _ = v8::Weak::with_guaranteed_finalizer(
         scope,
-        &local,
+        local,
         Box::new(|| unreachable!()),
       );
     }
 
     let scope = &mut v8::HandleScope::new(scope);
-    eval(scope, "gc()").unwrap();
+    scope
+      .request_garbage_collection_for_testing(v8::GarbageCollectionType::Full);
   }
 
   let finalizer_called = Rc::new(Cell::new(false));
@@ -7491,7 +7608,7 @@ fn guaranteed_finalizers() {
 
     let weak = Rc::new(v8::Weak::with_guaranteed_finalizer(
       scope,
-      &local,
+      local,
       Box::new(move || {
         let (weak, finalizer_called) = rx.try_recv().unwrap();
         finalizer_called.set(true);
@@ -7509,7 +7626,7 @@ fn guaranteed_finalizers() {
   };
 
   let scope = &mut v8::HandleScope::new(scope);
-  eval(scope, "gc()").unwrap();
+  scope.request_garbage_collection_for_testing(v8::GarbageCollectionType::Full);
   assert!(weak.is_empty());
   assert!(finalizer_called.get());
 }
@@ -7534,7 +7651,7 @@ fn weak_from_global() {
   assert_eq!(weak.to_global(scope).unwrap(), global);
 
   drop(global);
-  eval(scope, "gc()").unwrap();
+  scope.request_garbage_collection_for_testing(v8::GarbageCollectionType::Full);
   assert!(weak.is_empty());
 }
 
@@ -7561,10 +7678,10 @@ fn weak_from_into_raw() {
     let (weak1, weak2) = {
       let scope = &mut v8::HandleScope::new(scope);
       let local = v8::Object::new(scope);
-      let weak = v8::Weak::new(scope, &local);
+      let weak = v8::Weak::new(scope, local);
       let weak_with_finalizer = v8::Weak::with_finalizer(
         scope,
-        &local,
+        local,
         Box::new({
           let finalizer_called = finalizer_called.clone();
           move |_| {
@@ -7583,7 +7700,8 @@ fn weak_from_into_raw() {
       assert!(!finalizer_called.get());
       (weak1, weak2)
     };
-    eval(scope, "gc()").unwrap();
+    scope
+      .request_garbage_collection_for_testing(v8::GarbageCollectionType::Full);
     assert!(weak1.is_empty());
     assert!(weak2.is_empty());
     assert!(finalizer_called.get());
@@ -7594,10 +7712,11 @@ fn weak_from_into_raw() {
     let weak = {
       let scope = &mut v8::HandleScope::new(scope);
       let local = v8::Object::new(scope);
-      v8::Weak::new(scope, &local)
+      v8::Weak::new(scope, local)
     };
     assert!(!weak.is_empty());
-    eval(scope, "gc()").unwrap();
+    scope
+      .request_garbage_collection_for_testing(v8::GarbageCollectionType::Full);
     assert!(weak.is_empty());
     assert_eq!(weak.into_raw(), None);
   }
@@ -7608,10 +7727,10 @@ fn weak_from_into_raw() {
     let (weak, weak_with_finalizer) = {
       let scope = &mut v8::HandleScope::new(scope);
       let local = v8::Object::new(scope);
-      let weak = v8::Weak::new(scope, &local);
+      let weak = v8::Weak::new(scope, local);
       let weak_with_finalizer = v8::Weak::with_finalizer(
         scope,
-        &local,
+        local,
         Box::new({
           let finalizer_called = finalizer_called.clone();
           move |_| {
@@ -7628,7 +7747,8 @@ fn weak_from_into_raw() {
     let raw2 = weak_with_finalizer.into_raw();
     assert!(raw1.is_some());
     assert!(raw2.is_some());
-    eval(scope, "gc()").unwrap();
+    scope
+      .request_garbage_collection_for_testing(v8::GarbageCollectionType::Full);
     assert!(finalizer_called.get());
     let weak1 = unsafe { v8::Weak::from_raw(scope, raw1) };
     let weak2 = unsafe { v8::Weak::from_raw(scope, raw2) };
@@ -7642,9 +7762,10 @@ fn weak_from_into_raw() {
     let local = v8::Object::new(scope);
     v8::Weak::new(scope, local).into_raw();
     v8::Weak::with_finalizer(scope, local, Box::new(|_| {})).into_raw();
-    eval(scope, "gc()").unwrap();
+    scope
+      .request_garbage_collection_for_testing(v8::GarbageCollectionType::Full);
   }
-  eval(scope, "gc()").unwrap();
+  scope.request_garbage_collection_for_testing(v8::GarbageCollectionType::Full);
 }
 
 #[test]
@@ -7667,7 +7788,7 @@ fn drop_weak_from_raw_in_finalizer() {
     let local = v8::Object::new(scope);
     let weak = v8::Weak::with_finalizer(
       scope,
-      &local,
+      local,
       Box::new({
         let weak_ptr = weak_ptr.clone();
         let finalized = finalized.clone();
@@ -7684,7 +7805,7 @@ fn drop_weak_from_raw_in_finalizer() {
   }
 
   assert!(!finalized.get());
-  eval(scope, "gc()").unwrap();
+  scope.request_garbage_collection_for_testing(v8::GarbageCollectionType::Full);
   assert!(finalized.get());
 }
 
@@ -7742,10 +7863,10 @@ fn finalizer_on_kept_global() {
     let scope = &mut v8::ContextScope::new(scope, context);
 
     let object = v8::Object::new(scope);
-    global = v8::Global::new(scope, &object);
+    global = v8::Global::new(scope, object);
     weak1 = v8::Weak::with_finalizer(
       scope,
-      &object,
+      object,
       Box::new({
         let finalized = regular_finalized.clone();
         move |_| finalized.set(true)
@@ -7753,7 +7874,7 @@ fn finalizer_on_kept_global() {
     );
     weak2 = v8::Weak::with_guaranteed_finalizer(
       scope,
-      &object,
+      object,
       Box::new({
         let guaranteed_finalized = guaranteed_finalized.clone();
         move || guaranteed_finalized.set(true)
@@ -8523,4 +8644,191 @@ fn test_fast_calls_callback_options_data() {
   "#;
   eval(scope, source).unwrap();
   assert!(unsafe { DATA });
+}
+
+#[test]
+fn test_detach_key() {
+  let _setup_guard = setup();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  let scope = &mut v8::HandleScope::new(isolate);
+  let context = v8::Context::new(scope);
+  let scope = &mut v8::ContextScope::new(scope, context);
+
+  // Object detach key
+  {
+    let detach_key = eval(scope, "({})").unwrap();
+    assert!(detach_key.is_object());
+    let buffer = v8::ArrayBuffer::new(scope, 1024);
+    buffer.set_detach_key(detach_key);
+    assert!(buffer.is_detachable());
+    assert_eq!(buffer.detach(None), None);
+    assert!(!buffer.was_detached());
+    assert_eq!(buffer.detach(Some(detach_key)), Some(true));
+    assert!(buffer.was_detached());
+  }
+
+  // External detach key
+  {
+    let mut rust_detach_key = Box::new(42usize);
+    let v8_detach_key = v8::External::new(
+      scope,
+      &mut *rust_detach_key as *mut usize as *mut c_void,
+    );
+    let buffer = v8::ArrayBuffer::new(scope, 1024);
+    buffer.set_detach_key(v8_detach_key.into());
+    assert!(buffer.is_detachable());
+    assert_eq!(buffer.detach(None), None);
+    assert!(!buffer.was_detached());
+    assert_eq!(buffer.detach(Some(v8_detach_key.into())), Some(true));
+    assert!(buffer.was_detached());
+  }
+
+  // Undefined detach key
+  {
+    let buffer = v8::ArrayBuffer::new(scope, 1024);
+    buffer.set_detach_key(v8::undefined(scope).into());
+    assert!(buffer.is_detachable());
+    assert_eq!(buffer.detach(Some(v8::undefined(scope).into())), Some(true));
+    assert!(buffer.was_detached());
+  }
+}
+
+#[test]
+fn test_fast_calls_onebytestring() {
+  static mut WHO: &str = "none";
+  fn fast_fn(
+    _recv: v8::Local<v8::Object>,
+    data: *const fast_api::FastApiOneByteString,
+  ) -> u32 {
+    unsafe { WHO = "fast" };
+    let data = unsafe { &*data }.as_str();
+    assert_eq!("hello", data);
+    data.len() as u32
+  }
+
+  pub struct FastTest;
+  impl fast_api::FastFunction for FastTest {
+    fn args(&self) -> &'static [fast_api::Type] {
+      &[fast_api::Type::V8Value, fast_api::Type::SeqOneByteString]
+    }
+
+    fn return_type(&self) -> fast_api::CType {
+      fast_api::CType::Uint32
+    }
+
+    fn function(&self) -> *const c_void {
+      fast_fn as _
+    }
+  }
+
+  fn slow_fn(
+    _: &mut v8::HandleScope,
+    _: v8::FunctionCallbackArguments,
+    _: v8::ReturnValue,
+  ) {
+    unsafe { WHO = "slow" };
+  }
+
+  let _setup_guard = setup();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  let scope = &mut v8::HandleScope::new(isolate);
+  let context = v8::Context::new(scope);
+  let scope = &mut v8::ContextScope::new(scope, context);
+
+  let global = context.global(scope);
+
+  let template =
+    v8::FunctionTemplate::builder(slow_fn).build_fast(scope, &FastTest, None);
+
+  let name = v8::String::new(scope, "func").unwrap();
+  let value = template.get_function(scope).unwrap();
+  global.set(scope, name.into(), value.into()).unwrap();
+  let source = r#"
+  function f(data) { return func(data); }
+  %PrepareFunctionForOptimization(f);
+  const str = "hello";
+  f(str);
+"#;
+  eval(scope, source).unwrap();
+  assert_eq!("slow", unsafe { WHO });
+
+  let source = r#"
+    %OptimizeFunctionOnNextCall(f);
+    const result = f(str);
+    if (result != 5) {
+      throw new Error("wrong result");
+    }
+  "#;
+  eval(scope, source).unwrap();
+  assert_eq!("fast", unsafe { WHO });
+}
+
+#[test]
+fn gc_callbacks() {
+  let _setup_guard = setup();
+
+  #[derive(Default)]
+  struct GCCallbackState {
+    mark_sweep_calls: u64,
+    incremental_marking_calls: u64,
+  }
+
+  extern "C" fn callback(
+    _isolate: *mut v8::Isolate,
+    r#type: v8::GCType,
+    _flags: v8::GCCallbackFlags,
+    data: *mut c_void,
+  ) {
+    // We should get a mark-sweep GC here.
+    assert_eq!(r#type, v8::GC_TYPE_MARK_SWEEP_COMPACT);
+    let state = unsafe { &mut *(data as *mut GCCallbackState) };
+    state.mark_sweep_calls += 1;
+  }
+
+  extern "C" fn callback2(
+    _isolate: *mut v8::Isolate,
+    r#type: v8::GCType,
+    _flags: v8::GCCallbackFlags,
+    data: *mut c_void,
+  ) {
+    // We should get a mark-sweep GC here.
+    assert_eq!(r#type, v8::GC_TYPE_INCREMENTAL_MARKING);
+    let state = unsafe { &mut *(data as *mut GCCallbackState) };
+    state.incremental_marking_calls += 1;
+  }
+
+  let mut state = GCCallbackState::default();
+  let state_ptr = &mut state as *mut _ as *mut c_void;
+  let isolate = &mut v8::Isolate::new(Default::default());
+  isolate.add_gc_prologue_callback(callback, state_ptr, v8::GC_TYPE_ALL);
+  isolate.add_gc_prologue_callback(
+    callback2,
+    state_ptr,
+    v8::GC_TYPE_INCREMENTAL_MARKING | v8::GC_TYPE_PROCESS_WEAK_CALLBACK,
+  );
+
+  {
+    let scope = &mut v8::HandleScope::new(isolate);
+    let context = v8::Context::new(scope);
+    let scope = &mut v8::ContextScope::new(scope, context);
+
+    scope
+      .request_garbage_collection_for_testing(v8::GarbageCollectionType::Full);
+    assert_eq!(state.mark_sweep_calls, 1);
+    assert_eq!(state.incremental_marking_calls, 0);
+  }
+
+  isolate.remove_gc_prologue_callback(callback, state_ptr);
+  isolate.remove_gc_prologue_callback(callback2, state_ptr);
+  {
+    let scope = &mut v8::HandleScope::new(isolate);
+    let context = v8::Context::new(scope);
+    let scope = &mut v8::ContextScope::new(scope, context);
+
+    scope
+      .request_garbage_collection_for_testing(v8::GarbageCollectionType::Full);
+    // Assert callback was removed and not called again.
+    assert_eq!(state.mark_sweep_calls, 1);
+    assert_eq!(state.incremental_marking_calls, 0);
+  }
 }

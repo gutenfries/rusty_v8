@@ -4,6 +4,7 @@ use std::cell::Cell;
 use std::ffi::c_void;
 use std::ops::Deref;
 use std::ptr;
+use std::ptr::null;
 use std::ptr::null_mut;
 use std::ptr::NonNull;
 use std::slice;
@@ -41,6 +42,7 @@ extern "C" {
     this: *const ArrayBuffer,
     key: *const Value,
   ) -> MaybeBool;
+  fn v8__ArrayBuffer__SetDetachKey(this: *const ArrayBuffer, key: *const Value);
   fn v8__ArrayBuffer__Data(this: *const ArrayBuffer) -> *mut c_void;
   fn v8__ArrayBuffer__IsDetachable(this: *const ArrayBuffer) -> bool;
   fn v8__ArrayBuffer__WasDetached(this: *const ArrayBuffer) -> bool;
@@ -408,24 +410,32 @@ impl ArrayBuffer {
   /// Detaching sets the byte length of the buffer and all typed arrays to zero,
   /// preventing JavaScript from ever accessing underlying backing store.
   /// ArrayBuffer should have been externalized and must be detachable. Returns
-  /// `None` if the key didn't pass the [[ArrayBufferDetachKey]] check,
+  /// `None` if the key didn't pass the `[[ArrayBufferDetachKey]]` check,
   /// and `Some(true)` otherwise.
   #[inline(always)]
-  pub fn detach(&self, key: Local<Value>) -> Option<bool> {
+  pub fn detach(&self, key: Option<Local<Value>>) -> Option<bool> {
     // V8 terminates when the ArrayBuffer is not detachable. Non-detachable
     // buffers are buffers that are in use by WebAssembly or asm.js.
     if self.is_detachable() {
-      unsafe { v8__ArrayBuffer__Detach(self, &*key) }.into()
+      let key = key.map(|v| &*v as *const Value).unwrap_or(null());
+      unsafe { v8__ArrayBuffer__Detach(self, key) }.into()
     } else {
       Some(true)
     }
   }
 
+  /// Sets the `[[ArrayBufferDetachKey]]`.
+  #[inline(always)]
+  pub fn set_detach_key(&self, key: Local<Value>) {
+    unsafe { v8__ArrayBuffer__SetDetachKey(self, &*key) };
+  }
+
   /// More efficient shortcut for GetBackingStore()->Data().
   /// The returned pointer is valid as long as the ArrayBuffer is alive.
   #[inline(always)]
-  pub fn data(&self) -> *mut c_void {
-    unsafe { v8__ArrayBuffer__Data(self) }
+  pub fn data(&self) -> Option<NonNull<c_void>> {
+    let raw_ptr = unsafe { v8__ArrayBuffer__Data(self) };
+    NonNull::new(raw_ptr)
   }
 
   /// Get a shared pointer to the backing store of this array buffer. This

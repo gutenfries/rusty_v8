@@ -142,6 +142,11 @@ void v8__Isolate__Enter(v8::Isolate* isolate) { isolate->Enter(); }
 
 void v8__Isolate__Exit(v8::Isolate* isolate) { isolate->Exit(); }
 
+void v8__Isolate__MemoryPressureNotification(v8::Isolate* isolate,
+                                             v8::MemoryPressureLevel level) {
+  isolate->MemoryPressureNotification(level);
+}
+
 void v8__Isolate__ClearKeptObjects(v8::Isolate* isolate) {
   isolate->ClearKeptObjects();
 }
@@ -247,6 +252,19 @@ bool v8__Isolate__AddMessageListener(v8::Isolate* isolate,
   return isolate->AddMessageListener(callback);
 }
 
+void v8__Isolate__AddGCPrologueCallback(v8::Isolate* isolate,
+                                        v8::Isolate::GCCallbackWithData callback,
+                                        void* data,
+                                        v8::GCType gc_type_filter) {
+  isolate->AddGCPrologueCallback(callback, data, gc_type_filter);
+}
+
+void v8__Isolate__RemoveGCPrologueCallback(v8::Isolate* isolate,
+                                           v8::Isolate::GCCallbackWithData callback,
+                                           void* data) {
+  isolate->RemoveGCPrologueCallback(callback, data);
+}
+
 void v8__Isolate__AddNearHeapLimitCallback(v8::Isolate* isolate,
                                            v8::NearHeapLimitCallback callback,
                                            void* data) {
@@ -297,6 +315,11 @@ void v8__Isolate__SetWasmStreamingCallback(v8::Isolate* isolate,
 
 bool v8__Isolate__HasPendingBackgroundTasks(v8::Isolate* isolate) {
   return isolate->HasPendingBackgroundTasks();
+}
+
+void v8__Isolate__RequestGarbageCollectionForTesting(
+  v8::Isolate* isolate, v8::Isolate::GarbageCollectionType type) {
+  isolate->RequestGarbageCollectionForTesting(type);
 }
 
 void v8__Isolate__CreateParams__CONSTRUCT(
@@ -759,6 +782,10 @@ bool v8__Value__BooleanValue(const v8::Value& self, v8::Isolate* isolate) {
   return self.BooleanValue(isolate);
 }
 
+const v8::String* v8__Value__TypeOf(v8::Value& self, v8::Isolate* isolate) {
+  return local_to_ptr(self.TypeOf(isolate));
+}
+
 const v8::Primitive* v8__Null(v8::Isolate* isolate) {
   return local_to_ptr(v8::Null(isolate));
 }
@@ -832,7 +859,12 @@ bool v8__ArrayBuffer__IsDetachable(const v8::ArrayBuffer& self) {
 }
 
 bool v8__ArrayBuffer__WasDetached(const v8::ArrayBuffer& self) {
-  return v8::Utils::OpenHandle(&self)->was_detached();
+  return ptr_to_local(&self)->WasDetached();
+}
+
+void v8__ArrayBuffer__SetDetachKey(const v8::ArrayBuffer& self,
+                                   const v8::Value* key) {
+  return ptr_to_local(&self)->SetDetachKey(ptr_to_local(key));
 }
 
 void* v8__BackingStore__Data(const v8::BackingStore& self) {
@@ -2439,14 +2471,46 @@ v8_inspector::V8InspectorSession* v8_inspector__V8Inspector__connect(
 
 void v8_inspector__V8Inspector__contextCreated(
     v8_inspector::V8Inspector* self, const v8::Context& context,
-    int contextGroupId, v8_inspector::StringView humanReadableName) {
-  self->contextCreated(v8_inspector::V8ContextInfo(
-      ptr_to_local(&context), contextGroupId, humanReadableName));
+    int contextGroupId, v8_inspector::StringView humanReadableName,
+    v8_inspector::StringView auxData) {
+  v8_inspector::V8ContextInfo info(
+      ptr_to_local(&context), contextGroupId, humanReadableName);
+  info.auxData = auxData;
+  self->contextCreated(info);
+}
+
+void v8_inspector__V8Inspector__contextDestroyed(
+    v8_inspector::V8Inspector* self, const v8::Context& context) {
+  self->contextDestroyed(ptr_to_local(&context));
 }
 
 bool v8_inspector__V8InspectorSession__canDispatchMethod(
     v8_inspector::StringView method) {
   return v8_inspector::V8InspectorSession::canDispatchMethod(method);
+}
+
+unsigned v8_inspector__V8Inspector__exceptionThrown(
+    v8_inspector::V8Inspector* self, const v8::Context& context,
+    v8_inspector::StringView message, const v8::Value& exception,
+    v8_inspector::StringView detailed_message, v8_inspector::StringView url,
+    unsigned line_number, unsigned column_number,
+    v8_inspector::V8StackTrace* stack_trace, int script_id) {
+  return self->exceptionThrown(
+      ptr_to_local(&context), message, ptr_to_local(&exception),
+      detailed_message, url, line_number, column_number,
+      static_cast<std::unique_ptr<v8_inspector::V8StackTrace>>(stack_trace),
+      script_id);
+}
+
+v8_inspector::V8StackTrace* v8_inspector__V8Inspector__createStackTrace(
+    v8_inspector::V8Inspector* self, const v8::StackTrace& stack_trace) {
+  std::unique_ptr<v8_inspector::V8StackTrace> u =
+      self->createStackTrace(ptr_to_local(&stack_trace));
+  return u.release();
+}
+
+void v8_inspector__V8StackTrace__DELETE(v8_inspector::V8StackTrace* self) {
+  delete self;
 }
 
 void v8_inspector__V8InspectorSession__DELETE(
@@ -2759,6 +2823,11 @@ void v8__WasmStreaming__Abort(WasmStreamingSharedPtr* self,
 void v8__WasmStreaming__SetUrl(WasmStreamingSharedPtr* self, const char* url,
                                size_t len) {
   self->inner->SetUrl(url, len);
+}
+
+const v8::ArrayBuffer* v8__WasmMemoryObject__Buffer(
+    const v8::WasmMemoryObject& self) {
+  return local_to_ptr(ptr_to_local(&self)->Buffer());
 }
 
 using HeapSnapshotCallback = bool (*)(void*, const char*, size_t);

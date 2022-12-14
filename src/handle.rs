@@ -1,5 +1,6 @@
 use std::borrow::Borrow;
 use std::cell::Cell;
+use std::ffi::c_void;
 use std::hash::Hash;
 use std::hash::Hasher;
 use std::marker::PhantomData;
@@ -7,8 +8,6 @@ use std::mem::forget;
 use std::mem::transmute;
 use std::ops::Deref;
 use std::ptr::NonNull;
-
-use libc::c_void;
 
 use crate::support::Opaque;
 use crate::Data;
@@ -145,8 +144,7 @@ impl<'s, T> Deref for Local<'s, T> {
 
 /// An object reference that is independent of any handle scope. Where
 /// a Local handle only lives as long as the HandleScope in which it was
-/// allocated, a global handle remains valid until it is explicitly
-/// disposed using reset().
+/// allocated, a global handle remains valid until it is dropped.
 ///
 /// A global handle contains a reference to a storage cell within
 /// the V8 engine which holds an object value and which is updated by
@@ -351,7 +349,7 @@ impl<'a, T> Handle for &'a UnsafeRefHandle<'_, T> {
 
 impl<'s, T> Borrow<T> for Local<'s, T> {
   fn borrow(&self) -> &T {
-    &**self
+    self
   }
 }
 
@@ -370,7 +368,7 @@ impl<T> Eq for Global<T> where T: Eq {}
 
 impl<'s, T: Hash> Hash for Local<'s, T> {
   fn hash<H: Hasher>(&self, state: &mut H) {
-    (&**self).hash(state)
+    (**self).hash(state)
   }
 }
 
@@ -397,7 +395,7 @@ where
   }
 }
 
-impl<'s, T, Rhs: Handle> PartialEq<Rhs> for Global<T>
+impl<T, Rhs: Handle> PartialEq<Rhs> for Global<T>
 where
   T: PartialEq<Rhs::Data>,
 {

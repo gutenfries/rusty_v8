@@ -23,6 +23,8 @@ use crate::support::UniqueRef;
 use crate::Context;
 use crate::Isolate;
 use crate::Local;
+use crate::StackTrace;
+use crate::Value;
 use std::fmt::{self, Debug, Formatter};
 
 extern "C" {
@@ -109,7 +111,29 @@ extern "C" {
     context: *const Context,
     contextGroupId: int,
     humanReadableName: StringView,
+    auxData: StringView,
   );
+  fn v8_inspector__V8Inspector__contextDestroyed(
+    this: *mut V8Inspector,
+    context: *const Context,
+  );
+  fn v8_inspector__V8Inspector__exceptionThrown(
+    this: *mut V8Inspector,
+    context: *const Context,
+    message: StringView,
+    exception: *const Value,
+    detailed_message: StringView,
+    url: StringView,
+    line_number: u32,
+    column_number: u32,
+    stack_trace: *mut V8StackTrace,
+    script_id: int,
+  ) -> u32;
+  fn v8_inspector__V8Inspector__createStackTrace(
+    this: *mut V8Inspector,
+    stack_trace: *const StackTrace,
+  ) -> *mut V8StackTrace;
+  fn v8_inspector__V8StackTrace__DELETE(this: &mut V8StackTrace);
 }
 
 #[no_mangle]
@@ -818,7 +842,7 @@ impl fmt::Display for CharacterArray<'_, u8> {
 
 impl fmt::Display for CharacterArray<'_, u16> {
   fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-    f.write_str(&string::String::from_utf16_lossy(&*self))
+    f.write_str(&string::String::from_utf16_lossy(self))
   }
 }
 
@@ -937,6 +961,7 @@ impl V8Inspector {
     context: Local<Context>,
     context_group_id: i32,
     human_readable_name: StringView,
+    aux_data: StringView,
   ) {
     unsafe {
       v8_inspector__V8Inspector__contextCreated(
@@ -944,7 +969,53 @@ impl V8Inspector {
         &*context,
         context_group_id,
         human_readable_name,
+        aux_data,
       )
+    }
+  }
+
+  pub fn context_destroyed(&mut self, context: Local<Context>) {
+    unsafe { v8_inspector__V8Inspector__contextDestroyed(self, &*context) }
+  }
+
+  #[allow(clippy::too_many_arguments)]
+  pub fn exception_thrown(
+    &mut self,
+    context: Local<Context>,
+    message: StringView,
+    exception: Local<Value>,
+    detailed_message: StringView,
+    url: StringView,
+    line_number: u32,
+    column_number: u32,
+    stack_trace: UniquePtr<V8StackTrace>,
+    script_id: i32,
+  ) -> u32 {
+    unsafe {
+      v8_inspector__V8Inspector__exceptionThrown(
+        self,
+        &*context,
+        message,
+        &*exception,
+        detailed_message,
+        url,
+        line_number,
+        column_number,
+        stack_trace.into_raw(),
+        script_id,
+      )
+    }
+  }
+
+  pub fn create_stack_trace(
+    &mut self,
+    stack_trace: Local<StackTrace>,
+  ) -> UniquePtr<V8StackTrace> {
+    unsafe {
+      UniquePtr::from_raw(v8_inspector__V8Inspector__createStackTrace(
+        self,
+        &*stack_trace,
+      ))
     }
   }
 }
@@ -959,6 +1030,12 @@ impl Drop for V8Inspector {
 #[derive(Debug)]
 pub struct V8StackTrace {
   _cxx_vtable: CxxVTable,
+}
+
+impl Drop for V8StackTrace {
+  fn drop(&mut self) {
+    unsafe { v8_inspector__V8StackTrace__DELETE(self) };
+  }
 }
 
 // TODO(bnoordhuis) This needs to be fleshed out more but that can wait
