@@ -10,11 +10,12 @@ use std::ffi::CStr;
 use std::hash::Hash;
 use std::mem::MaybeUninit;
 use std::os::raw::c_char;
-use std::ptr::NonNull;
+use std::ptr::{addr_of, NonNull};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use v8::fast_api;
+use v8::inspector::ChannelBase;
 
 // TODO(piscisaureus): Ideally there would be no need to import this trait.
 use v8::MapFnTo;
@@ -3268,7 +3269,12 @@ fn context_promise_hooks() {
       .unwrap(),
     )
     .unwrap();
-    context.set_promise_hooks(init_hook, before_hook, after_hook, resolve_hook);
+    context.set_promise_hooks(
+      Some(init_hook),
+      Some(before_hook),
+      Some(after_hook),
+      Some(resolve_hook),
+    );
 
     let source = r#"
       function expect(expected, actual = promises.size) {
@@ -3300,6 +3306,80 @@ fn context_promise_hooks() {
       scope,
       r#"
       expect(0, promiseStack.length);
+    "#,
+    )
+    .unwrap();
+  }
+}
+
+#[test]
+fn context_promise_hooks_partial() {
+  let _setup_guard = setup::parallel_test();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  {
+    let scope = &mut v8::HandleScope::new(isolate);
+    let context = v8::Context::new(scope);
+    let scope = &mut v8::ContextScope::new(scope, context);
+    let init_hook = v8::Local::<v8::Function>::try_from(
+      eval(
+        scope,
+        r#"
+      globalThis.promises = new Set();
+      function initHook(promise) {
+        promises.add(promise);
+      }
+      initHook;
+    "#,
+      )
+      .unwrap(),
+    )
+    .unwrap();
+    let before_hook = v8::Local::<v8::Function>::try_from(
+      eval(
+        scope,
+        r#"
+      globalThis.promiseStack = [];
+      function beforeHook(promise) {
+        promiseStack.push(promise);
+      }
+      beforeHook;
+    "#,
+      )
+      .unwrap(),
+    )
+    .unwrap();
+    context.set_promise_hooks(Some(init_hook), Some(before_hook), None, None);
+
+    let source = r#"
+      function expect(expected, actual = promises.size) {
+        if (actual !== expected) throw `expected ${expected}, actual ${actual}`;
+      }
+      expect(0);
+      var p = new Promise(resolve => {
+        expect(1);
+        resolve();
+        expect(1);
+      });
+      expect(1);
+      new Promise(() => {});
+      expect(2);
+
+      expect(0, promiseStack.length);
+      p.then(() => {
+        expect(1, promiseStack.length);
+      });
+      promises.values().next().value
+    "#;
+    let promise = eval(scope, source).unwrap();
+    let promise = v8::Local::<v8::Promise>::try_from(promise).unwrap();
+    assert!(promise.has_handler());
+    assert_eq!(promise.state(), v8::PromiseState::Fulfilled);
+
+    scope.perform_microtask_checkpoint();
+    let _ = eval(
+      scope,
+      r#"
+      expect(1, promiseStack.length);
     "#,
     )
     .unwrap();
@@ -5046,6 +5126,15 @@ impl v8::inspector::V8InspectorClientImpl for ClientCounter {
     &mut self.base
   }
 
+  unsafe fn base_ptr(
+    this: *const Self,
+  ) -> *const v8::inspector::V8InspectorClientBase
+  where
+    Self: Sized,
+  {
+    unsafe { addr_of!((*this).base) }
+  }
+
   fn run_message_loop_on_pause(&mut self, context_group_id: i32) {
     assert_eq!(context_group_id, 1);
     self.count_run_message_loop_on_pause += 1;
@@ -5092,6 +5181,12 @@ impl v8::inspector::ChannelImpl for ChannelCounter {
   }
   fn base_mut(&mut self) -> &mut v8::inspector::ChannelBase {
     &mut self.base
+  }
+  unsafe fn base_ptr(_this: *const Self) -> *const ChannelBase
+  where
+    Self: Sized,
+  {
+    unsafe { addr_of!((*_this).base) }
   }
   fn send_response(
     &mut self,
@@ -5365,6 +5460,12 @@ fn inspector_console_api_message() {
 
     fn base_mut(&mut self) -> &mut V8InspectorClientBase {
       &mut self.base
+    }
+
+    unsafe fn base_ptr(
+      _this: *const Self,
+    ) -> *const v8::inspector::V8InspectorClientBase {
+      unsafe { addr_of!((*_this).base) }
     }
 
     fn console_api_message(
@@ -7843,37 +7944,6 @@ fn drop_weak_from_raw_in_finalizer() {
 }
 
 #[test]
-fn finalizer_on_global_object() {
-  use std::cell::Cell;
-  use std::rc::Rc;
-
-  let _setup_guard = setup::parallel_test();
-
-  let weak;
-  let finalized = Rc::new(Cell::new(false));
-
-  {
-    let isolate = &mut v8::Isolate::new(Default::default());
-    let scope = &mut v8::HandleScope::new(isolate);
-    let context = v8::Context::new(scope);
-    let scope = &mut v8::ContextScope::new(scope, context);
-
-    let global_object = context.global(scope);
-    weak = v8::Weak::with_finalizer(
-      scope,
-      global_object,
-      Box::new({
-        let finalized = finalized.clone();
-        move |_| finalized.set(true)
-      }),
-    );
-  }
-
-  assert!(finalized.get());
-  drop(weak);
-}
-
-#[test]
 fn finalizer_on_kept_global() {
   // If a global is kept alive after an isolate is dropped, regular finalizers
   // won't be called, but guaranteed ones will.
@@ -8943,4 +9013,33 @@ fn test_fast_calls_pointer() {
   "#;
   eval(scope, source).unwrap();
   assert_eq!("fast", unsafe { WHO });
+}
+
+#[test]
+fn object_define_property() {
+  let _setup_guard = setup::parallel_test();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  {
+    let scope = &mut v8::HandleScope::new(isolate);
+    let context = v8::Context::new(scope);
+    let scope = &mut v8::ContextScope::new(scope, context);
+
+    let mut desc = v8::PropertyDescriptor::new();
+    desc.set_configurable(true);
+    desc.set_enumerable(false);
+
+    let name = v8::String::new(scope, "g").unwrap();
+    context
+      .global(scope)
+      .define_property(scope, name.into(), &desc);
+    let source = r#"
+      {
+        const d = Object.getOwnPropertyDescriptor(globalThis, "g");
+        [d.configurable, d.enumerable, d.writable].toString()
+      }
+    "#;
+    let actual = eval(scope, source).unwrap();
+    let expected = v8::String::new(scope, "true,false,false").unwrap();
+    assert!(expected.strict_equals(actual));
+  }
 }

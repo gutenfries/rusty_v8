@@ -1046,8 +1046,8 @@ bool v8__String__ContainsOnlyOneByte(const v8::String& self) {
 }
 
 const v8::Symbol* v8__Symbol__New(v8::Isolate* isolate,
-                                  const v8::String& description) {
-  return local_to_ptr(v8::Symbol::New(isolate, ptr_to_local(&description)));
+                                  const v8::String* description) {
+  return local_to_ptr(v8::Symbol::New(isolate, ptr_to_local(description)));
 }
 
 const v8::Symbol* v8__Symbol__For(v8::Isolate* isolate,
@@ -1084,13 +1084,13 @@ const v8::Value* v8__Symbol__Description(const v8::Symbol& self,
 }
 
 const v8::Private* v8__Private__New(v8::Isolate* isolate,
-                                    const v8::String& name) {
-  return local_to_ptr(v8::Private::New(isolate, ptr_to_local(&name)));
+                                    const v8::String* name) {
+  return local_to_ptr(v8::Private::New(isolate, ptr_to_local(name)));
 }
 
 const v8::Private* v8__Private__ForApi(v8::Isolate* isolate,
-                                       const v8::String& name) {
-  return local_to_ptr(v8::Private::ForApi(isolate, ptr_to_local(&name)));
+                                       const v8::String* name) {
+  return local_to_ptr(v8::Private::ForApi(isolate, ptr_to_local(name)));
 }
 
 const v8::Value* v8__Private__Name(const v8::Private& self) {
@@ -1252,6 +1252,14 @@ MaybeBool v8__Object__DefineOwnProperty(const v8::Object& self,
                                         v8::PropertyAttribute attr) {
   return maybe_to_maybe_bool(ptr_to_local(&self)->DefineOwnProperty(
       ptr_to_local(&context), ptr_to_local(&key), ptr_to_local(&value), attr));
+}
+
+MaybeBool v8__Object__DefineProperty(const v8::Object& self,
+                                        const v8::Context& context,
+                                        const v8::Name& key,
+                                        v8::PropertyDescriptor& desc) {
+  return maybe_to_maybe_bool(ptr_to_local(&self)->DefineProperty(
+      ptr_to_local(&context), ptr_to_local(&key), desc));
 }
 
 MaybeBool v8__Object__SetAccessor(const v8::Object& self,
@@ -1701,13 +1709,14 @@ const v8::Object* v8__Context__GetExtrasBindingObject(v8::Context& self) {
   return local_to_ptr(ptr_to_local(&self)->GetExtrasBindingObject());
 }
 
-void v8__Context__SetPromiseHooks(v8::Context& self, v8::Function& init_hook,
-                                  v8::Function& before_hook,
-                                  v8::Function& after_hook,
-                                  v8::Function& resolve_hook) {
+void v8__Context__SetPromiseHooks(v8::Context& self,
+                                  const v8::Function* init_hook,
+                                  const v8::Function* before_hook,
+                                  const v8::Function* after_hook,
+                                  const v8::Function* resolve_hook) {
   ptr_to_local(&self)->SetPromiseHooks(
-      ptr_to_local(&init_hook), ptr_to_local(&before_hook),
-      ptr_to_local(&after_hook), ptr_to_local(&resolve_hook));
+      ptr_to_local(init_hook), ptr_to_local(before_hook),
+      ptr_to_local(after_hook), ptr_to_local(resolve_hook));
 }
 
 const v8::Context* v8__Context__FromSnapshot(v8::Isolate* isolate,
@@ -3225,6 +3234,39 @@ size_t icu_get_default_locale(char* output, size_t output_len) {
 void icu_set_default_locale(const char* locale) {
   UErrorCode status = U_ZERO_ERROR;
   icu::Locale::setDefault(icu::Locale(locale), status);
+}
+
+}  // extern "C"
+
+// v8::PropertyDescriptor
+
+extern "C" {
+
+static_assert(sizeof(v8::PropertyDescriptor) == sizeof(size_t),
+              "v8::PropertyDescriptor size mismatch");
+
+void v8__PropertyDescriptor__CONSTRUCT(uninit_t<v8::PropertyDescriptor>* buf) {
+  construct_in_place<v8::PropertyDescriptor>(buf);
+}
+
+void v8__PropertyDescriptor__CONSTRUCT__Get_Set(
+    uninit_t<v8::PropertyDescriptor>* buf, v8::Local<v8::Value> get,
+    v8::Local<v8::Value> set) {
+  construct_in_place<v8::PropertyDescriptor>(buf, get, set);
+}
+
+void v8__PropertyDescriptor__DESTRUCT(v8::PropertyDescriptor* self) {
+  self->~PropertyDescriptor();
+}
+
+void v8__PropertyDescriptor__set_enumerable(v8::PropertyDescriptor* self,
+                                       bool enumurable) {
+  self->set_enumerable(enumurable);
+}
+
+void v8__PropertyDescriptor__set_configurable(v8::PropertyDescriptor* self,
+                                       bool configurable) {
+  self->set_configurable(configurable);
 }
 
 }  // extern "C"
