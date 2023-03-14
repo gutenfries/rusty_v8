@@ -5,7 +5,6 @@ use crate::isolate::Isolate;
 use crate::isolate::RawSlot;
 use crate::support::int;
 use crate::Context;
-use crate::Function;
 use crate::HandleScope;
 use crate::Local;
 use crate::Object;
@@ -27,13 +26,6 @@ extern "C" {
   fn v8__Context__Global(this: *const Context) -> *const Object;
   fn v8__Context__GetExtrasBindingObject(this: *const Context)
     -> *const Object;
-  fn v8__Context__SetPromiseHooks(
-    this: *const Context,
-    init_hook: *const Function,
-    before_hook: *const Function,
-    after_hook: *const Function,
-    resolve_hook: *const Function,
-  );
   fn v8__Context__GetNumberOfEmbedderDataFields(this: *const Context) -> u32;
   fn v8__Context__GetAlignedPointerFromEmbedderData(
     this: *const Context,
@@ -48,6 +40,14 @@ extern "C" {
     isolate: *mut Isolate,
     context_snapshot_index: usize,
   ) -> *const Context;
+  pub(super) fn v8__Context__GetSecurityToken(
+    this: *const Context,
+  ) -> *const Value;
+  pub(super) fn v8__Context__SetSecurityToken(
+    this: *const Context,
+    value: *const Value,
+  );
+  pub(super) fn v8__Context__UseDefaultSecurityToken(this: *const Context);
 }
 
 impl Context {
@@ -105,25 +105,6 @@ impl Context {
     scope: &mut HandleScope<'s, ()>,
   ) -> Local<'s, Object> {
     unsafe { scope.cast_local(|_| v8__Context__Global(self)) }.unwrap()
-  }
-
-  #[inline(always)]
-  pub fn set_promise_hooks(
-    &self,
-    init_hook: Option<Local<Function>>,
-    before_hook: Option<Local<Function>>,
-    after_hook: Option<Local<Function>>,
-    resolve_hook: Option<Local<Function>>,
-  ) {
-    unsafe {
-      v8__Context__SetPromiseHooks(
-        self,
-        init_hook.map_or_else(null, |v| &*v),
-        before_hook.map_or_else(null, |v| &*v),
-        after_hook.map_or_else(null, |v| &*v),
-        resolve_hook.map_or_else(null, |v| &*v),
-      )
-    }
   }
 
   #[inline]
@@ -345,6 +326,29 @@ impl Context {
       scope.cast_local(|sd| {
         v8__Context__FromSnapshot(sd.get_isolate_mut(), context_snapshot_index)
       })
+    }
+  }
+
+  #[inline(always)]
+  pub fn get_security_token<'s>(
+    &self,
+    scope: &mut HandleScope<'s, ()>,
+  ) -> Local<'s, Value> {
+    unsafe { scope.cast_local(|_| v8__Context__GetSecurityToken(self)) }
+      .unwrap()
+  }
+
+  #[inline(always)]
+  pub fn set_security_token(&self, token: Local<Value>) {
+    unsafe {
+      v8__Context__SetSecurityToken(self, &*token);
+    }
+  }
+
+  #[inline(always)]
+  pub fn use_default_security_token(&self) {
+    unsafe {
+      v8__Context__UseDefaultSecurityToken(self);
     }
   }
 }

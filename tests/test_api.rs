@@ -3269,7 +3269,7 @@ fn context_promise_hooks() {
       .unwrap(),
     )
     .unwrap();
-    context.set_promise_hooks(
+    scope.set_promise_hooks(
       Some(init_hook),
       Some(before_hook),
       Some(after_hook),
@@ -3348,7 +3348,7 @@ fn context_promise_hooks_partial() {
       .unwrap(),
     )
     .unwrap();
-    context.set_promise_hooks(Some(init_hook), Some(before_hook), None, None);
+    scope.set_promise_hooks(Some(init_hook), Some(before_hook), None, None);
 
     let source = r#"
       function expect(expected, actual = promises.size) {
@@ -3383,6 +3383,77 @@ fn context_promise_hooks_partial() {
     "#,
     )
     .unwrap();
+  }
+}
+
+#[test]
+fn security_token() {
+  let _setup_guard = setup::parallel_test();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  {
+    let scope = &mut v8::HandleScope::new(isolate);
+    let context = v8::Context::new(scope);
+    let scope = &mut v8::ContextScope::new(scope, context);
+
+    // Define a variable in the parent context
+    let global = {
+      let global = context.global(scope);
+      let variable_key = v8::String::new(scope, "variable").unwrap();
+      let variable_value = v8::String::new(scope, "value").unwrap();
+      global.set(scope, variable_key.into(), variable_value.into());
+      v8::Global::new(scope, global)
+    };
+    // This code will try to access the variable defined in the parent context
+    let source = r#"
+      if (variable !== 'value') {
+        throw new Error('Expected variable to be value');
+      }
+    "#;
+
+    let templ = v8::ObjectTemplate::new(scope);
+    let global = v8::Local::new(scope, global);
+    templ.set_named_property_handler(
+      v8::NamedPropertyHandlerConfiguration::new()
+        .getter(
+          |scope: &mut v8::HandleScope,
+           key: v8::Local<v8::Name>,
+           args: v8::PropertyCallbackArguments,
+           mut rv: v8::ReturnValue| {
+            let obj = v8::Local::<v8::Object>::try_from(args.data()).unwrap();
+            if let Some(val) = obj.get(scope, key.into()) {
+              rv.set(val);
+            }
+          },
+        )
+        .data(global.into()),
+    );
+
+    // Creates a child context
+    {
+      let security_token = context.get_security_token(scope);
+      let child_context = v8::Context::new_from_template(scope, templ);
+      // Without the security context, the variable can not be shared
+      child_context.set_security_token(security_token);
+      let child_scope = &mut v8::ContextScope::new(scope, child_context);
+      let try_catch = &mut v8::TryCatch::new(child_scope);
+      let result = eval(try_catch, source);
+      assert!(!try_catch.has_caught());
+      assert!(result.unwrap().is_undefined());
+    }
+
+    // Runs the same code but without the security token, it should fail
+    {
+      let child_context = v8::Context::new_from_template(scope, templ);
+      let child_scope = &mut v8::ContextScope::new(scope, child_context);
+      let try_catch = &mut v8::TryCatch::new(child_scope);
+      let result = eval(try_catch, source);
+      assert!(try_catch.has_caught());
+      let exc = try_catch.exception().unwrap();
+      let exc = exc.to_string(try_catch).unwrap();
+      let exc = exc.to_rust_string_lossy(try_catch);
+      assert!(exc.contains("no access"));
+      assert!(result.is_none());
+    }
   }
 }
 
@@ -4001,6 +4072,30 @@ fn array_buffer_view() {
     assert!(maybe_ab.is_some());
     let ab = maybe_ab.unwrap();
     assert_eq!(ab.byte_length(), 4);
+  }
+}
+
+#[test]
+fn continuation_preserved_embedder_data() {
+  let _setup_guard = setup::parallel_test();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  {
+    let scope = &mut v8::HandleScope::new(isolate);
+    let context = v8::Context::new(scope);
+    let scope = &mut v8::ContextScope::new(scope, context);
+    let data = scope.get_continuation_preserved_embedder_data();
+    assert!(data.is_undefined());
+
+    let value = v8::String::new(scope, "hello").unwrap();
+    scope.set_continuation_preserved_embedder_data(value.into());
+    let data = scope.get_continuation_preserved_embedder_data();
+    assert!(data.is_string());
+    assert_eq!(data.to_rust_string_lossy(scope), "hello");
+
+    eval(scope, "b = 2 + 3").unwrap();
+    let data = scope.get_continuation_preserved_embedder_data();
+    assert!(data.is_string());
+    assert_eq!(data.to_rust_string_lossy(scope), "hello");
   }
 }
 
@@ -7026,6 +7121,7 @@ fn unbound_module_script_conversion() {
 
 #[test]
 fn cached_data_version_tag() {
+  let _setup_guard = setup::sequential_test();
   // The value is unpredictable/unstable, as it is generated from a combined
   // hash of the V8 version number and select configuration flags. This test
   // asserts that it returns the same value twice in a row (the value ought to
@@ -9025,6 +9121,59 @@ fn object_define_property() {
     let scope = &mut v8::ContextScope::new(scope, context);
 
     let mut desc = v8::PropertyDescriptor::new();
+    desc.set_configurable(true);
+    desc.set_enumerable(false);
+
+    let name = v8::String::new(scope, "g").unwrap();
+    context
+      .global(scope)
+      .define_property(scope, name.into(), &desc);
+    let source = r#"
+      {
+        const d = Object.getOwnPropertyDescriptor(globalThis, "g");
+        [d.configurable, d.enumerable, d.writable].toString()
+      }
+    "#;
+    let actual = eval(scope, source).unwrap();
+    let expected = v8::String::new(scope, "true,false,false").unwrap();
+    assert!(expected.strict_equals(actual));
+  }
+
+  {
+    let scope = &mut v8::HandleScope::new(isolate);
+    let context = v8::Context::new(scope);
+    let scope = &mut v8::ContextScope::new(scope, context);
+
+    let mut desc = v8::PropertyDescriptor::new_from_value_writable(
+      v8::Integer::new(scope, 42).into(),
+      true,
+    );
+    desc.set_configurable(true);
+    desc.set_enumerable(false);
+
+    let name = v8::String::new(scope, "g").unwrap();
+    context
+      .global(scope)
+      .define_property(scope, name.into(), &desc);
+    let source = r#"
+      {
+        const d = Object.getOwnPropertyDescriptor(globalThis, "g");
+        [d.configurable, d.enumerable, d.writable].toString()
+      }
+    "#;
+    let actual = eval(scope, source).unwrap();
+    let expected = v8::String::new(scope, "true,false,true").unwrap();
+    assert!(expected.strict_equals(actual));
+  }
+
+  {
+    let scope = &mut v8::HandleScope::new(isolate);
+    let context = v8::Context::new(scope);
+    let scope = &mut v8::ContextScope::new(scope, context);
+
+    let mut desc = v8::PropertyDescriptor::new_from_value(
+      v8::Integer::new(scope, 42).into(),
+    );
     desc.set_configurable(true);
     desc.set_enumerable(false);
 

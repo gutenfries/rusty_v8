@@ -1719,11 +1719,38 @@ void v8__Context__SetPromiseHooks(v8::Context& self,
       ptr_to_local(after_hook), ptr_to_local(resolve_hook));
 }
 
+const v8::Value* v8__Context__GetSecurityToken(const v8::Context& self) {
+  auto value = ptr_to_local(&self)->GetSecurityToken();
+  return local_to_ptr(value); 
+}
+
+void v8__Context__SetSecurityToken(v8::Context& self,
+                                                       const v8::Value* token) {
+  auto c = ptr_to_local(&self);
+  c->SetSecurityToken(ptr_to_local(token));
+}
+
+void v8__Context__UseDefaultSecurityToken(v8::Context& self) {
+  ptr_to_local(&self)->UseDefaultSecurityToken();
+}
+
 const v8::Context* v8__Context__FromSnapshot(v8::Isolate* isolate,
                                              size_t context_snapshot_index) {
   v8::MaybeLocal<v8::Context> maybe_local =
       v8::Context::FromSnapshot(isolate, context_snapshot_index);
   return maybe_local_to_ptr(maybe_local);
+}
+
+void v8__Context__SetContinuationPreservedEmbedderData(v8::Context& context,
+                                                       const v8::Value* data) {
+  auto c = ptr_to_local(&context);
+  c->SetContinuationPreservedEmbedderData(ptr_to_local(data));
+}
+
+const v8::Value* v8__Context__GetContinuationPreservedEmbedderData(
+    const v8::Context& context) {
+  auto value = ptr_to_local(&context)->GetContinuationPreservedEmbedderData();
+  return local_to_ptr(value);
 }
 
 const v8::String* v8__Message__Get(const v8::Message& self) {
@@ -3247,6 +3274,17 @@ static_assert(sizeof(v8::PropertyDescriptor) == sizeof(size_t),
 
 void v8__PropertyDescriptor__CONSTRUCT(uninit_t<v8::PropertyDescriptor>* buf) {
   construct_in_place<v8::PropertyDescriptor>(buf);
+}
+
+void v8__PropertyDescriptor__CONSTRUCT__Value_Writable(
+    uninit_t<v8::PropertyDescriptor>* buf, v8::Local<v8::Value> value,
+    bool writable) {
+  construct_in_place<v8::PropertyDescriptor>(buf, value, writable);
+}
+
+void v8__PropertyDescriptor__CONSTRUCT__Value(
+    uninit_t<v8::PropertyDescriptor>* buf, v8::Local<v8::Value> value) {
+  construct_in_place<v8::PropertyDescriptor>(buf, value);
 }
 
 void v8__PropertyDescriptor__CONSTRUCT__Get_Set(
