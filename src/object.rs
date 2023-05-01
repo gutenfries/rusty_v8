@@ -2,6 +2,7 @@ use crate::isolate::Isolate;
 use crate::support::int;
 use crate::support::MapFnTo;
 use crate::support::MaybeBool;
+use crate::AccessorConfiguration;
 use crate::AccessorNameGetterCallback;
 use crate::AccessorNameSetterCallback;
 use crate::Array;
@@ -19,10 +20,13 @@ use crate::Private;
 use crate::PropertyAttribute;
 use crate::PropertyDescriptor;
 use crate::PropertyFilter;
+use crate::Set;
+use crate::String;
 use crate::Value;
 use std::convert::TryFrom;
 use std::ffi::c_void;
 use std::num::NonZeroI32;
+use std::ptr::null;
 
 extern "C" {
   fn v8__Object__New(isolate: *mut Isolate) -> *const Object;
@@ -38,13 +42,9 @@ extern "C" {
     context: *const Context,
     key: *const Name,
     getter: AccessorNameGetterCallback,
-  ) -> MaybeBool;
-  fn v8__Object__SetAccessorWithSetter(
-    this: *const Object,
-    context: *const Context,
-    key: *const Name,
-    getter: AccessorNameGetterCallback,
-    setter: AccessorNameSetterCallback,
+    setter: Option<AccessorNameSetterCallback>,
+    data_or_null: *const Value,
+    attr: PropertyAttribute,
   ) -> MaybeBool;
   fn v8__Object__Get(
     this: *const Object,
@@ -74,6 +74,7 @@ extern "C" {
     context: *const Context,
     prototype: *const Value,
   ) -> MaybeBool;
+  fn v8__Object__GetConstructorName(this: *const Object) -> *const String;
   fn v8__Object__CreateDataProperty(
     this: *const Object,
     context: *const Context,
@@ -212,6 +213,25 @@ extern "C" {
   ) -> MaybeBool;
   fn v8__Map__Size(map: *const Map) -> usize;
   fn v8__Map__As__Array(this: *const Map) -> *const Array;
+  fn v8__Set__New(isolate: *mut Isolate) -> *const Set;
+  fn v8__Set__Clear(this: *const Set);
+  fn v8__Set__Add(
+    this: *const Set,
+    context: *const Context,
+    key: *const Value,
+  ) -> *const Set;
+  fn v8__Set__Has(
+    this: *const Set,
+    context: *const Context,
+    key: *const Value,
+  ) -> MaybeBool;
+  fn v8__Set__Delete(
+    this: *const Set,
+    context: *const Context,
+    key: *const Value,
+  ) -> MaybeBool;
+  fn v8__Set__Size(map: *const Set) -> usize;
+  fn v8__Set__As__Array(this: *const Set) -> *const Array;
 }
 
 impl Object {
@@ -293,6 +313,12 @@ impl Object {
       v8__Object__SetPrototype(self, &*scope.get_current_context(), &*prototype)
     }
     .into()
+  }
+
+  /// Returns the name of the function invoked as a constructor for this object.
+  #[inline(always)]
+  pub fn get_constructor_name(&self) -> Local<String> {
+    unsafe { Local::from_raw(v8__Object__GetConstructorName(self)) }.unwrap()
   }
 
   /// Implements CreateDataProperty (ECMA-262, 7.3.4).
@@ -407,15 +433,11 @@ impl Object {
     name: Local<Name>,
     getter: impl for<'s> MapFnTo<AccessorNameGetterCallback<'s>>,
   ) -> Option<bool> {
-    unsafe {
-      v8__Object__SetAccessor(
-        self,
-        &*scope.get_current_context(),
-        &*name,
-        getter.map_fn_to(),
-      )
-    }
-    .into()
+    self.set_accessor_with_configuration(
+      scope,
+      name,
+      AccessorConfiguration::new(getter),
+    )
   }
 
   #[inline(always)]
@@ -426,13 +448,28 @@ impl Object {
     getter: impl for<'s> MapFnTo<AccessorNameGetterCallback<'s>>,
     setter: impl for<'s> MapFnTo<AccessorNameSetterCallback<'s>>,
   ) -> Option<bool> {
+    self.set_accessor_with_configuration(
+      scope,
+      name,
+      AccessorConfiguration::new(getter).setter(setter),
+    )
+  }
+  #[inline(always)]
+  pub fn set_accessor_with_configuration(
+    &self,
+    scope: &mut HandleScope,
+    name: Local<Name>,
+    configuration: AccessorConfiguration,
+  ) -> Option<bool> {
     unsafe {
-      v8__Object__SetAccessorWithSetter(
+      v8__Object__SetAccessor(
         self,
         &*scope.get_current_context(),
         &*name,
-        getter.map_fn_to(),
-        setter.map_fn_to(),
+        configuration.getter,
+        configuration.setter,
+        configuration.data.map_or_else(null, |p| &*p),
+        configuration.property_attribute,
       )
     }
     .into()
@@ -840,5 +877,60 @@ impl Map {
   #[inline(always)]
   pub fn as_array<'s>(&self, scope: &mut HandleScope<'s>) -> Local<'s, Array> {
     unsafe { scope.cast_local(|_| v8__Map__As__Array(self)) }.unwrap()
+  }
+}
+
+impl Set {
+  #[inline(always)]
+  pub fn new<'s>(scope: &mut HandleScope<'s>) -> Local<'s, Set> {
+    unsafe { scope.cast_local(|sd| v8__Set__New(sd.get_isolate_ptr())) }
+      .unwrap()
+  }
+
+  #[inline(always)]
+  pub fn size(&self) -> usize {
+    unsafe { v8__Set__Size(self) }
+  }
+
+  #[inline(always)]
+  pub fn clear(&self) {
+    unsafe { v8__Set__Clear(self) }
+  }
+
+  #[inline(always)]
+  pub fn add<'s>(
+    &self,
+    scope: &mut HandleScope<'s>,
+    key: Local<Value>,
+  ) -> Option<Local<'s, Set>> {
+    unsafe {
+      scope.cast_local(|sd| v8__Set__Add(self, sd.get_current_context(), &*key))
+    }
+  }
+
+  #[inline(always)]
+  pub fn has(
+    &self,
+    scope: &mut HandleScope,
+    key: Local<Value>,
+  ) -> Option<bool> {
+    unsafe { v8__Set__Has(self, &*scope.get_current_context(), &*key) }.into()
+  }
+
+  #[inline(always)]
+  pub fn delete(
+    &self,
+    scope: &mut HandleScope,
+    key: Local<Value>,
+  ) -> Option<bool> {
+    unsafe { v8__Set__Delete(self, &*scope.get_current_context(), &*key) }
+      .into()
+  }
+
+  /// Returns an array of length size() * 2, where index N is the Nth key and
+  /// index N + 1 is the Nth value.
+  #[inline(always)]
+  pub fn as_array<'s>(&self, scope: &mut HandleScope<'s>) -> Local<'s, Array> {
+    unsafe { scope.cast_local(|_| v8__Set__As__Array(self)) }.unwrap()
   }
 }

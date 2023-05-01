@@ -49,7 +49,7 @@ static_assert(sizeof(v8::PromiseRejectMessage) == sizeof(size_t) * 3,
 static_assert(sizeof(v8::Locker) == sizeof(size_t) * 2, "Locker size mismatch");
 
 static_assert(sizeof(v8::ScriptCompiler::Source) ==
-                  align_to<size_t>(sizeof(size_t) * 6 + sizeof(int) * 3),
+                  align_to<size_t>(sizeof(size_t) * 9 + sizeof(int) * 2),
               "Source size mismatch");
 
 static_assert(sizeof(v8::FunctionCallbackInfo<v8::Value>) == sizeof(size_t) * 3,
@@ -620,6 +620,10 @@ bool v8__Value__IsSetIterator(const v8::Value& self) {
   return self.IsSetIterator();
 }
 
+bool v8__Value__IsSetGeneratorObject(const v8::Value& self) {
+  return self.IsGeneratorObject();
+}
+
 bool v8__Value__IsWeakMap(const v8::Value& self) { return self.IsWeakMap(); }
 
 bool v8__Value__IsWeakSet(const v8::Value& self) { return self.IsWeakSet(); }
@@ -844,6 +848,10 @@ v8::BackingStore* v8__ArrayBuffer__NewBackingStore__with_data(
 
 two_pointers_t v8__ArrayBuffer__GetBackingStore(const v8::ArrayBuffer& self) {
   return make_pod<two_pointers_t>(ptr_to_local(&self)->GetBackingStore());
+}
+
+bool v8__BackingStore__IsResizableByUserJavaScript(const v8::BackingStore& self) {
+  return ptr_to_local(&self)->IsResizableByUserJavaScript();
 }
 
 void* v8__ArrayBuffer__Data(const v8::ArrayBuffer& self) {
@@ -1122,17 +1130,15 @@ void v8__ObjectTemplate__SetInternalFieldCount(const v8::ObjectTemplate& self,
   ptr_to_local(&self)->SetInternalFieldCount(value);
 }
 
-void v8__ObjectTemplate__SetAccessor(const v8::ObjectTemplate& self,
-                                     const v8::Name& key,
-                                     v8::AccessorNameGetterCallback getter) {
-  ptr_to_local(&self)->SetAccessor(ptr_to_local(&key), getter);
-}
-
-void v8__ObjectTemplate__SetAccessorWithSetter(
+void v8__ObjectTemplate__SetAccessor(
     const v8::ObjectTemplate& self, const v8::Name& key,
     v8::AccessorNameGetterCallback getter,
-    v8::AccessorNameSetterCallback setter) {
-  ptr_to_local(&self)->SetAccessor(ptr_to_local(&key), getter, setter);
+    v8::AccessorNameSetterCallback setter,
+    const v8::Value* data_or_null, 
+    v8::PropertyAttribute attr) {
+  ptr_to_local(&self)->SetAccessor(
+    ptr_to_local(&key), getter, setter,  ptr_to_local(data_or_null), v8::AccessControl::DEFAULT,
+    attr);
 }
 
 void v8__ObjectTemplate__SetNamedPropertyHandler(
@@ -1237,6 +1243,10 @@ MaybeBool v8__Object__SetPrototype(const v8::Object& self,
       ptr_to_local(&context), ptr_to_local(&prototype)));
 }
 
+const v8::String* v8__Object__GetConstructorName(v8::Object& self) {
+  return local_to_ptr(self.GetConstructorName());
+}
+
 MaybeBool v8__Object__CreateDataProperty(const v8::Object& self,
                                          const v8::Context& context,
                                          const v8::Name& key,
@@ -1265,17 +1275,13 @@ MaybeBool v8__Object__DefineProperty(const v8::Object& self,
 MaybeBool v8__Object__SetAccessor(const v8::Object& self,
                                   const v8::Context& context,
                                   const v8::Name& key,
-                                  v8::AccessorNameGetterCallback getter) {
+                                  v8::AccessorNameGetterCallback getter, 
+                                  v8::AccessorNameSetterCallback setter,
+                                  const v8::Value* data_or_null, 
+                                  v8::PropertyAttribute attr) {
   return maybe_to_maybe_bool(ptr_to_local(&self)->SetAccessor(
-      ptr_to_local(&context), ptr_to_local(&key), getter));
-}
-
-MaybeBool v8__Object__SetAccessorWithSetter(
-    const v8::Object& self, const v8::Context& context, const v8::Name& key,
-    v8::AccessorNameGetterCallback getter,
-    v8::AccessorNameSetterCallback setter) {
-  return maybe_to_maybe_bool(ptr_to_local(&self)->SetAccessor(
-      ptr_to_local(&context), ptr_to_local(&key), getter, setter));
+      ptr_to_local(&context), ptr_to_local(&key), getter, setter,
+      ptr_to_local(data_or_null), v8::AccessControl::DEFAULT,attr));
 }
 
 v8::Isolate* v8__Object__GetIsolate(const v8::Object& self) {
@@ -1491,6 +1497,38 @@ MaybeBool v8__Map__Delete(const v8::Map& self, const v8::Context& context,
 }
 
 const v8::Array* v8__Map__As__Array(const v8::Map& self) {
+  return local_to_ptr(self.AsArray());
+}
+
+const v8::Set* v8__Set__New(v8::Isolate* isolate) {
+  return local_to_ptr(v8::Set::New(isolate));
+}
+
+size_t v8__Set__Size(const v8::Set& self) { return self.Size(); }
+
+void v8__Set__Clear(const v8::Set& self) {
+  return ptr_to_local(&self)->Clear();
+}
+
+v8::Set* v8__Set__Add(const v8::Set& self, const v8::Context& context,
+                              const v8::Value& key) {
+  return maybe_local_to_ptr(
+      ptr_to_local(&self)->Add(ptr_to_local(&context), ptr_to_local(&key)));
+}
+
+MaybeBool v8__Set__Has(const v8::Set& self, const v8::Context& context,
+                       const v8::Value& key) {
+  return maybe_to_maybe_bool(
+      ptr_to_local(&self)->Has(ptr_to_local(&context), ptr_to_local(&key)));
+}
+
+MaybeBool v8__Set__Delete(const v8::Set& self, const v8::Context& context,
+                          const v8::Value& key) {
+  return maybe_to_maybe_bool(
+      ptr_to_local(&self)->Delete(ptr_to_local(&context), ptr_to_local(&key)));
+}
+
+const v8::Array* v8__Set__As__Array(const v8::Set& self) {
   return local_to_ptr(self.AsArray());
 }
 
@@ -1732,6 +1770,14 @@ void v8__Context__SetSecurityToken(v8::Context& self,
 
 void v8__Context__UseDefaultSecurityToken(v8::Context& self) {
   ptr_to_local(&self)->UseDefaultSecurityToken();
+}
+
+void v8__Context__AllowCodeGenerationFromStrings(v8::Context& self, bool allow) {
+   ptr_to_local(&self)->AllowCodeGenerationFromStrings(allow); 
+}
+
+bool v8__Context_IsCodeGenerationFromStringsAllowed(v8::Context& self) {
+   return ptr_to_local(&self)->IsCodeGenerationFromStringsAllowed();
 }
 
 const v8::Context* v8__Context__FromSnapshot(v8::Isolate* isolate,
@@ -1980,11 +2026,13 @@ const v8::ObjectTemplate* v8__FunctionTemplate__InstanceTemplate(
   return local_to_ptr(ptr_to_local(&self)->InstanceTemplate());
 }
 
-const extern int v8__FunctionCallbackInfo__kArgsLength =
-    v8::FunctionCallbackInfo<v8::Value>::kArgsLength;
+const extern int v8__FunctionCallbackInfo__kArgsLength = 6;
+// NOTE(bartlomieju): V8 made this field private in 11.4
+// v8::FunctionCallbackInfo<v8::Value>::kArgsLength;
 
-const extern int v8__PropertyCallbackInfo__kArgsLength =
-    v8::PropertyCallbackInfo<v8::Value>::kArgsLength;
+const extern int v8__PropertyCallbackInfo__kArgsLength = 7;
+// NOTE(bartlomieju): V8 made this field private in 11.4
+// v8::PropertyCallbackInfo<v8::Value>::kArgsLength;
 
 bool v8__PropertyCallbackInfo__ShouldThrowOnError(
     const v8::PropertyCallbackInfo<v8::Value>& self) {
@@ -2033,6 +2081,11 @@ const v8::Value* v8__ReturnValue__Get(const v8::ReturnValue<v8::Value>& self) {
 const v8::StackTrace* v8__StackTrace__CurrentStackTrace(v8::Isolate* isolate,
                                                         int frame_limit) {
   return local_to_ptr(v8::StackTrace::CurrentStackTrace(isolate, frame_limit));
+}
+
+const v8::String* v8__StackTrace__CurrentScriptNameOrSourceURL(
+  v8::Isolate* isolate) {
+  return local_to_ptr(v8::StackTrace::CurrentScriptNameOrSourceURL(isolate));
 }
 
 int v8__StackTrace__GetFrameCount(const v8::StackTrace& self) {
@@ -2899,14 +2952,6 @@ void v8__HeapProfiler__TakeHeapSnapshot(v8::Isolate* isolate,
   // good chance it'll keep working for 8 more.
   const_cast<v8::HeapSnapshot*>(snapshot)->Delete();
 }
-
-// This is necessary for v8__internal__GetIsolateFromHeapObject() to be
-// reliable enough for our purposes.
-#if UINTPTR_MAX == 0xffffffffffffffff && \
-    !(defined V8_SHARED_RO_HEAP or defined V8_COMPRESS_POINTERS)
-#error V8 must be built with either the 'v8_enable_pointer_compression' or \
-'v8_enable_shared_ro_heap' feature enabled.
-#endif
 
 v8::Isolate* v8__internal__GetIsolateFromHeapObject(const v8::Data& data) {
   namespace i = v8::internal;

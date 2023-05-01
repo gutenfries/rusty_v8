@@ -30,7 +30,7 @@ pub struct CFunction(Opaque);
 
 impl CFunctionInfo {
   #[inline(always)]
-  pub(crate) unsafe fn new(
+  pub unsafe fn new(
     args: *const CTypeInfo,
     args_len: usize,
     return_type: *const CTypeInfo,
@@ -45,11 +45,11 @@ pub struct CTypeInfo(Opaque);
 
 impl CTypeInfo {
   #[inline(always)]
-  pub(crate) fn new(ty: CType) -> NonNull<CTypeInfo> {
+  pub fn new(ty: CType) -> NonNull<CTypeInfo> {
     unsafe { NonNull::new_unchecked(v8__CTypeInfo__New(ty)) }
   }
 
-  pub(crate) fn new_from_slice(types: &[Type]) -> NonNull<CTypeInfo> {
+  pub fn new_from_slice(types: &[Type]) -> NonNull<CTypeInfo> {
     let mut structs = vec![];
 
     for type_ in types.iter() {
@@ -218,14 +218,9 @@ pub struct FastApiOneByteString {
 
 impl FastApiOneByteString {
   #[inline(always)]
-  pub fn as_str(&self) -> &str {
-    // SAFETY: The string is guaranteed to be valid UTF-8.
-    unsafe {
-      std::str::from_utf8_unchecked(std::slice::from_raw_parts(
-        self.data,
-        self.length as usize,
-      ))
-    }
+  pub fn as_bytes(&self) -> &[u8] {
+    // SAFETY: The data is guaranteed to be valid for the length of the string.
+    unsafe { std::slice::from_raw_parts(self.data, self.length as usize) }
   }
 }
 
@@ -249,12 +244,23 @@ impl<T: Default> FastApiTypedArray<T> {
   }
 }
 
-pub trait FastFunction {
-  fn args(&self) -> &'static [Type] {
-    &[]
+pub struct FastFunction {
+  pub args: &'static [Type],
+  pub return_type: CType,
+  pub function: *const c_void,
+}
+
+impl FastFunction {
+  #[inline(always)]
+  pub const fn new(
+    args: &'static [Type],
+    return_type: CType,
+    function: *const c_void,
+  ) -> Self {
+    Self {
+      args,
+      return_type,
+      function,
+    }
   }
-  fn return_type(&self) -> CType {
-    CType::Void
-  }
-  fn function(&self) -> *const c_void;
 }
